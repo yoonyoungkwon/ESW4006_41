@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stacked Bar Chart with Heatmap</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body {
+      background: #eee;
+      overflow-y: scroll;
+    }
+
+    .container {
+      width: 5000px;
+      height: 800px;
+      background: white;
+      display: flex;
+      justify-content: center;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .color-box {
+      width: 12px;
+      height: 12px;
+      margin-right: 8px;
+    }
+
+    .tooltip {
+      position: absolute;
+      background-color: rgba(0, 0, 0, 0.8);
+      color: white;
+      padding: 5px;
+      font-size: 12px;
+      border-radius: 5px;
+    }
+
+    .slider {
+      width: 80%;
+      margin: 10px auto;
+      display: flex;
+      align-items: center;
+    }
+
+    .slider-label {
+      text-align: center;
+      font-weight: bold;
+      margin-bottom: 10px;
+    }
+
+    .heatmap-tooltip {
+      position: absolute;
+      background-color: rgba(0, 0, 0, 0.8);
+      color: white;
+      padding: 5px;
+      font-size: 12px;
+      border-radius: 5px;
+    }
+  </style>
+
+</head>
+
+<body>
+  <div class="container">
+    <svg id="chart"></svg>
+  </div>
+
+  <div class="container">
+    <svg id="heatmap"></svg>
+  </div>
+
+  <div class="container">
+    <svg id="scatter"></svg>
+  </div>
+
+  <div class="slider">
+    <label for="time-slider" class="slider-label">Time: <span id="time-value"></span> ns</label>
+    <input type="range" min="102821293" max="667655179" step="1" value="102821293" id="time-slider">
+  </div>
+
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script>
+    // SVG 크기 설정
+    var svgWidth = 1000;
+    var svgHeight = 600;
+
+    var colorbarWidth = 20;
+
+    var padding = { top: 100, right: 50, bottom: 100, left: 50 };
+
+    d3.csv("https://raw.githubusercontent.com/yoonyoungkwon/ESW4006_41/main/data.csv").then(function (data) {
+      // 데이터 전처리
+      data.forEach(function (d) {
+        d.DieID = +d.DieID;
+        d.ChannelID = +d.ChannelID;
+        d.Read = +d.Read;
+        d.Write = +d.Write;
+        d.StartTick = +d.StartTick;
+        d.EndTick = +d.EndTick;
+        d.CommandID = +d.CommandID;
+        d.latency = d.EndTick - d.StartTick;
+      });
+
+      data.sort(function (a, b) {
+        return a.StartTick - b.StartTick;
+      });
+
+      var channelData = d3.group(data, function (d) { return d.ChannelID; });
+
+      var maxDieID = d3.max(data, function (d) { return d.DieID; });
+      var maxChannelID = d3.max(data, function (d) { return d.ChannelID; });
+
+      var channelDieCounts = d3.group(data, function (d) { return d.ChannelID + "-" + d.DieID; });
+      var counts = Array.from(channelDieCounts, ([key, value]) => ({ key, value: value.length }));
+
+      var minTime = d3.min(data, function(d) { return d.StartTick; });
+      var maxTime = d3.max(data, function(d) { return d.EndTick; });
+
+      // 채널 별로 read request 개수와 write 개수 계산
+      var channelCounts = [];
+      for (var i = 0; i <= 7; i++) {
+        var readCount = 0;
+        var writeCount = 0;
+        if (channelData.has(i)) {
+          channelData.get(i).forEach(function (d) {
+            if (d.RequestType === "READ") {
+              readCount++;
+            } else if (d.RequestType === "WRITE") {
+              writeCount++;
+            }
+          });
+        }
+        channelCounts.push({
+          ChannelID: i,
+          Read: readCount,
+          Write: writeCount
+        });
+      }
+
+      // stacked bar chart 그리기
+      var svg = d3.select("#chart")
+        .attr("width", svgWidth)
+        .attr("height", svgHeight);
+
+      var totalWidth = svgWidth;
+      var totalHeight = svgHeight;
+
+      var xScale = d3.scaleBand()
+        .domain(d3.range(8))
+        .range([padding.left, totalWidth - padding.right])
+        .padding(0.5);
+
+      var yScale = d3.scaleLinear()
+        .domain([0, d3.max(channelCounts, function (d) { return d.Read + d.Write; })])
+        .range([totalHeight - padding.bottom, padding.top]);
+
+      var colorScale = d3.scaleOrdinal()
+        .domain(["Read", "Write"])
+        .range(["steelblue", "orange"]);
+
+      var bars = svg.selectAll(".bar-group")
+        .data(channelCounts)
+        .enter()
+        .append("g")
+        .attr("class", "bar-group")
+        .attr("transform", function (d) { return "translate(" + xScale(d.ChannelID) + ",0)"; });
+
+      bars.append("rect")
+        .attr("class", "read-bar")
+        .attr("x", 0)
+        .attr("y", function (d) { return Math.ceil(yScale(d.Read)); })
+        .attr("width", Math.ceil(xScale.bandwidth()))
+        .attr("height", function (d) { return Math.ceil(totalHeight - padding.bottom - yScale(d.Read)); })
+        .attr("fill", colorScale("Read"))
+        .on("mouseover", function (event, d) {
+          tooltip.transition()
+            .duration(200)
+            .style("opacity", 0.9);
+          tooltip.html("Read: " + d.Read)
+            .style("left", (event.pageX + 10) + "px")
+            .style("top", (event.pageY - 30) + "px");
+        })
+        .on("mouseout", function () {
+          tooltip.transition()
+            .duration(500)
+            .style("opacity", 0);
+        });
+
+      bars.append("rect")
+        .attr("class", "write-bar")
+        .attr("x", 0)
+        .attr("y", function (d) { return yScale(d.Read + d.Write); })
+        .attr("width", xScale.bandwidth())
+        .attr("height", function (d) { return totalHeight - padding.bottom - yScale(d.Write); })
+        .attr("fill", colorScale("Write"))
+        .on("mouseover", function (event, d) {
+          tooltip.transition()
+            .duration(200)
+            .style("opacity", 0.9);
+          tooltip.html("Write: " + d.Write)
+            .style("left", (event.pageX + 10) + "px")
+            .style("top", (event.pageY - 30) + "px");
+        })
+        .on("mouseout", function () {
+          tooltip.transition()
+            .duration(500)
+            .style("opacity", 0);
+        });
+
+      svg.append("g")
+        .attr("class", "x-axis")
+        .attr("transform", "translate(0," + (totalHeight - padding.bottom) + ")")
+        .call(d3.axisBottom(xScale));
+
+      svg.append("g")
+        .attr("class", "y-axis")
+        .attr("transform", "translate(" + padding.left + ",0)")
+        .call(d3.axisLeft(yScale).tickFormat(d3.format("d")));
+
+      var legend = svg.append("g")
+        .attr("class", "legend")
+        .attr("transform", "translate(" + (totalWidth - padding.right - 100) + "," + 30 + ")");
+
+      var legendItems = legend.selectAll(".legend-item")
+        .data(["Read", "Write"])
+        .enter()
+        .append("g")
+        .attr("class", "legend-item")
+        .attr("transform", function (d, i) { return "translate(0," + (i * 20) + ")"; });
+
+      legendItems.append("rect")
+        .attr("class", "color-box")
+        .attr("fill", function (d) { return colorScale(d); });
+
+      legendItems.append("text")
+        .attr("x", 20)
+        .attr("y", 10)
+        .text(function (d) { return d; });
+
+      // 툴팁 
+      var tooltip = d3.select("body")
+        .append("div")
+        .attr("class", "tooltip")
+        .style("opacity", 0);
+
+      // 시간 슬라이더
+      var timeSlider = document.getElementById("time-slider");
+      timeSlider.min = minTime;
+      timeSlider.max = maxTime;
+      timeSlider.value = minTime;
+      var timeValue = document.getElementById("time-value");
+
+      timeSlider.oninput = function () {
+        var time = this.value;
+        timeValue.innerHTML = time / 1000;
+
+        // 해당 시간에 따른 데이터 필터링
+        var filteredData = data.filter(function (d) {
+          return d.StartTick <= time && time <= d.EndTick;
+        });
+
+        var filteredData2 = data.filter(function (d) {
+          return d.StartTick <= time;
+        });
+
+        // 채널 별로 데이터 그룹화
+        var filteredChannelData = d3.group(filteredData, function (d) { return d.ChannelID; });
+        var filteredChannelData2 = d3.group(filteredData2, function (d) { return d.ChannelID; });
+
+        // 채널 별로 read request 개수와 write 개수 계산
+        var filteredChannelCounts = [];
+        for (var i = 0; i <= 7; i++) {
+          var readCount = 0;
+          var writeCount = 0;
+          if (filteredChannelData.has(i)) {
+            filteredChannelData.get(i).forEach(function (d) {
+              if (d.RequestType === "READ") {
+                readCount++;
+              } else if (d.RequestType === "WRITE") {
+                writeCount++;
+              }
+            });
+          }
+          filteredChannelCounts.push({
+            ChannelID: i,
+            Read: readCount,
+            Write: writeCount
+          });
+        }
+
+        yScale.domain([0, d3.max(filteredChannelCounts, function (d) { return d.Read + d.Write; })]);
+
+        svg.select(".y-axis")
+          .transition()
+          .duration(500)
+          .call(d3.axisLeft(yScale).tickFormat(function(d) {
+              return d % 1 === 0 ? d3.format("d")(d) : "";
+          }));
+          
+        // read 막대 업데이트
+        bars.data(filteredChannelCounts)
+          .select(".read-bar")
+          .transition()
+          .duration(500)
+          .attr("y", function (d) { return yScale(d.Read); })
+          .attr("height", function (d) { return totalHeight - padding.bottom - yScale(d.Read); });
+
+        // write 막대 업데이트
+        bars.data(filteredChannelCounts)
+          .select(".write-bar")
+          .transition()
+          .duration(500)
+          .attr("y", function (d) { return yScale(d.Read + d.Write); })
+          .attr("height", function (d) { return totalHeight - padding.bottom - yScale(d.Write); });
+
+        // // heatmap 업데이트
+        var updatedCounts = [];
+        for (var i = 0; i <= 7; i++) {
+          for (var j = 0; j <= maxDieID; j++) {
+            var key = i + "-" + (j);
+            var count = 0;
+            if (filteredChannelData2.has(i)) {
+              filteredChannelData2.get(i).forEach(function (d) {
+                if (d.DieID === j) {
+                  count++;
+                }
+              });
+            }
+            updatedCounts.push({ key: key, value: count });
+          }
+        }
+
+        cells.data(updatedCounts)
+          .transition()
+          .duration(500)
+          .style("fill", function (d) { return colorScale(d.value); });
+
+        var colorbarScale = d3.scaleSequential()
+          .interpolator(d3.interpolateBlues)
+          .domain([0, maxCount]);
+
+        // colorbar 최댓값 업데이트
+        colorbar.select(".colorbar-max-label")
+          .text(maxCount);
+
+        // scatterplot 업데이트
+        let circles = scatterSvg.selectAll("circle")
+              .data(filteredData, d => d.CommandID);
+
+        circles.exit().remove();
+
+        var color = d3.scaleOrdinal()
+          .domain(["READ", "WRITE"])
+          .range(["#F8766D", "#00BA38"])
+
+        circles.enter().append("circle")
+                    .attr("fill", function (d) { return color(d.RequestType) })
+                    .attr("cx", function (d) { return x(d.DieID); } )
+                    .attr("cy", function (d) { return y(d.ChannelID); } )
+                    .attr("r", function (d) { return Math.sqrt(d.latency) / 2500; })  // adjust the 100 factor to suit your needs
+                    .merge(circles);
+
+        circles.transition()
+            .duration(500)
+            .attr("cx", function (d) { return x(d.DieID); } )
+            .attr("cy", function (d) { return y(d.ChannelID); } )
+            .attr("r", function (d) { return Math.sqrt(d.latency) / 2500;})
+            .style("fill", function (d) { return color(d.RequestType) } );
+
+      };
+
+      // heatmap 그리기
+      var heatmapSvg = d3.select("#heatmap")
+        .attr("width", svgWidth)
+        .attr("height", svgHeight);
+
+      var colorbarHeight = svgHeight - padding.top - padding.bottom;
+      var maxCount = d3.max(counts, function(d) { return d.value; });
+      var colorbarScale = d3.scaleSequential()
+        .interpolator(d3.interpolateViridis)
+        .domain([0, maxCount]);
+
+      // colorbar 그리기
+      var colorbar = d3.select("#heatmap")
+        .append("g")
+        .attr("class", "colorbar")
+        .attr("transform", "translate(" + (svgWidth - padding.right - colorbarWidth) + "," + padding.top + ")");
+
+      var gradient = colorbar.append("defs")
+        .append("linearGradient")
+        .attr("id", "colorbar-gradient")
+        .attr("gradientUnits", "userSpaceOnUse")
+        .attr("x1", 0)
+        .attr("y1", 0)
+        .attr("x2", 0)
+        .attr("y2", colorbarHeight);
+
+      gradient.selectAll("stop")
+        .data(d3.ticks(0, 1, 10))
+        .enter()
+        .append("stop")
+        .attr("offset", function(d) { return d * 100 + "%"; })
+        .attr("stop-color", function(d) { return colorbarScale(d * maxCount); });
+
+      colorbar.selectAll(".colorbar-rect")
+        .data(d3.range(colorbarHeight))
+        .enter()
+        .append("rect")
+        .attr("class", "colorbar-rect")
+        .attr("x", 40)
+        .attr("y", function(d) { return d - 20; })
+        .attr("width", colorbarWidth)
+        .attr("height", 1)
+        .style("fill", "url(#colorbar-gradient)");
+
+      colorbar.append("text")
+        .attr("class", "colorbar-label")
+        .attr("x", colorbarWidth + 5)
+        .attr("y", colorbarHeight)
+        .attr("alignment-baseline", "text-bottom")
+        .text("Count");
+
+      colorbar.append("text")
+        .attr("class", "colorbar-min-label")
+        .attr("x", colorbarWidth + 5)
+        .attr("y", -5)
+        .attr("alignment-baseline", "text-top")
+        .text("0");
+
+      colorbar.append("text")
+        .attr("class", "colorbar-max-label")
+        .attr("x", colorbarWidth )
+        .attr("y", colorbarHeight - 30)
+        .attr("alignment-baseline", "text-bottom")
+        .text(d3.max(counts, function(d) { return d.value; }));
+
+      // 색상 스케일 설정
+      var colorScale = d3.scaleSequential()
+        .interpolator(d3.interpolateViridis)
+        .domain([0, maxCount]);
+
+      // 셀 그리기
+      var cells = heatmapSvg.selectAll(".cell")
+        .data(counts)
+        .enter()
+        .append("rect")
+        .attr("class", "cell")
+        .attr("x", function (d) { return Math.ceil((d.key.split("-")[1] - 1) * (svgWidth - padding.left - padding.right) / maxDieID + padding.left); })
+        .attr("y", function (d) { return Math.ceil((d.key.split("-")[0] - 1) * (svgHeight - padding.top - padding.bottom) / maxChannelID + padding.top); })
+        .attr("width", Math.ceil((svgWidth - padding.left - padding.right) / maxDieID))
+        .attr("height", Math.ceil((svgHeight - padding.top - padding.bottom) / maxChannelID))
+        .style("fill", function (d) { return colorScale(d.value); })
+        .on("mouseover", function (event, d) {
+          heatmapTooltip.transition()
+            .duration(200)
+            .style("opacity", 0.9);
+          heatmapTooltip.html("Request Count: " + d.value)
+            .style("left", (event.pageX + 10) + "px")
+            .style("top", (event.pageY - 30) + "px");
+        })
+        .on("mouseout", function () {
+          heatmapTooltip.transition()
+            .duration(500)
+            .style("opacity", 0);
+        });
+
+      // x 축 레이블 그리기
+      var xLabels = heatmapSvg.selectAll(".x-label")
+        .data(d3.range(0, maxDieID + 1))
+        .enter()
+        .append("text")
+        .attr("class", "x-label")
+        .attr("x", function (d) { return (d - 1) * (svgWidth - padding.left - padding.right) / maxDieID + padding.left + ((svgWidth - padding.left - padding.right) / maxDieID) / 2; })
+        .attr("y", padding.top - 65)
+        .attr("text-anchor", "middle")
+        .text(function (d) { return d; });
+
+      // y 축 레이블 그리기
+      var yLabels = heatmapSvg.selectAll(".y-label")
+        .data(d3.range(0, maxChannelID + 1))
+        .enter()
+        .append("text")
+        .attr("class", "y-label")
+        .attr("x", padding.left - 40)
+        .attr("y", function (d) { return (d - 1) * (svgHeight - padding.top - padding.bottom) / maxChannelID + padding.top + ((svgHeight - padding.top - padding.bottom) / maxChannelID) / 2; })
+        .attr("text-anchor", "middle")
+        .text(function (d) { return d; });
+
+      // 툴팁 
+      var heatmapTooltip = d3.select("body")
+        .append("div")
+        .attr("class", "heatmap-tooltip")
+        .style("opacity", 0);
+
+      // scatterplot 그리기
+      var scatterSvg = d3.select("#scatter")
+        // .attr("width", svgWidth)
+        // .attr("height", svgHeight);
+        .attr("width", svgWidth + padding.left + padding.right)
+        .attr("height", svgHeight + padding.top + padding.bottom);
+
+      // scale 만들기
+      const x = d3.scaleLinear()
+              .domain([0, d3.max(data, d => d.DieID)])
+              .range([100, svgWidth - 100]);
+              // .range([50, svgWidth - 50]);
+
+      scatterSvg.append("g")
+              .attr("transform", "translate(0," + svgHeight + ")")
+              .call(d3.axisBottom(x));
+
+      const y = d3.scaleLinear()
+          .domain([0, d3.max(data, d => d.ChannelID)])
+          .range([svgHeight-50, 50]);
+
+      scatterSvg.append("g")
+          .attr("class", "y-axis")
+          .attr("transform", "translate(" + (svgWidth-50) + ", 0)") // 이 부분을 추가
+          .call(d3.axisRight(y).tickValues([0,1,2,3,4,5,6,7]).tickFormat(d3.format("d")));
+
+      var color = d3.scaleOrdinal()
+          .domain(["READ", "WRITE"])
+          .range(["#F8766D", "#00BA38"])
+
+      scatterSvg.append("text")
+          .attr("class", "axis-label")
+          .attr("transform", "rotate(-90)")
+          .attr("x", -svgHeight / 2)
+          .attr("y", 20)
+          .style("text-anchor", "middle")
+          .text("ChannelID");
+
+        scatterSvg.append("text")
+          .attr("class", "axis-label")
+          .attr("transform", "translate(" + (svgWidth / 2) + "," + (svgHeight + 40) + ")")
+          .style("text-anchor", "middle")
+          .text("DieID");
+
+      // 점 그리기
+      var circles = scatterSvg.append('g')
+                    .selectAll("dot")
+                    .data(data)
+                    .enter()
+                    .append("circle")
+                    .attr("cx", function (d) { return x(d.DieID); } )
+                    .attr("cy", function (d) { return y(d.ChannelID); } )
+                    .attr("r", function (d) { return Math.sqrt(d.latency) / 2500;})
+                    .style("fill", function (d) { return color(d.latency) } )
+                    .style("opacity", 0);
+
+      var legend = scatterSvg.append("g")
+          .attr("class", "legend")
+          .attr("transform", "translate(20, 20)");
+
+      var legendEntries = [
+          { label: "READ", color: "#F8766D" },
+          { label: "WRITE", color: "#00BA38" }
+      ];
+
+      var legendItems = legend.selectAll(".legend-entry")
+          .data(legendEntries)
+          .enter()
+          .append("g")
+          .attr("class", "legend-entry")
+          .attr("transform", function (d, i) {
+              return "translate(0," + (i * 20) + ")";
+          });
+
+      legendItems.append("rect")
+          .attr("x", -10)
+          .attr("y", 4)
+          .attr("width", 12)
+          .attr("height", 12)
+          .style("fill", function (d) {
+              return d.color;
+          });
+
+      legendItems.append("text")
+          .attr("x", 30)
+          .attr("y", 10)
+          .attr("dy", "0.35em")
+          .text(function (d) {
+              return d.label;
+          });
+    });
+  </script>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"
+    integrity="sha384-ka7Sk0Gln4gmtz2MlQnikT1wXgYsOg+OMhuP+IlRH9sENBO0LRn5q+8nbTov4+1p"
+    crossorigin="anonymous"></script>
+</body>
+
+</html>
